@@ -158,10 +158,24 @@ library, which is why the tests and headless training run anywhere.
 
 ## Notes on training
 
-Expect phase 1 to take a while: the first generations are cars driving into
-walls. Checkpoint counts creeping up generation over generation is the signal to
-watch — `BestCP` in the log line. It is normal for progress to sit flat for a
-stretch before the adaptive mutation bump or the island restart shakes it loose.
+The first generations are cars driving into walls. Checkpoint counts creeping up
+generation over generation is the signal to watch — `BestCP` in the log line. It
+is normal for progress to sit flat for a stretch before the adaptive mutation
+bump or the island restart shakes it loose.
+
+One reference run, `--headless --generations 200 --max-steps 1500 --seed 11` on
+the default circuit:
+
+| generation | milestone |
+| --- | --- |
+| 2 | first completed lap, 22.8 s |
+| 6 | two laps, best lap 11.8 s |
+| 15 | first cars finish all three laps — phase 2 unlocks |
+| 19 | 25 of 40 cars finishing, best lap 4.8 s |
+
+Your mileage will differ with another seed; the point is the shape, not the
+numbers. Note how much of the lap-time improvement arrives *after* the phase
+switch — phase 1 has no reason to care how fast the car gets round.
 
 Model weights are deliberately not committed to this repository. Train your own
 with a few hundred generations of `python main.py train --headless`.
