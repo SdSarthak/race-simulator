@@ -1,5 +1,7 @@
 # Race Simulator
 
+[![tests](https://github.com/SdSarthak/race-simulator/actions/workflows/tests.yml/badge.svg)](https://github.com/SdSarthak/race-simulator/actions/workflows/tests.yml)
+
 A 2D racing simulator where cars learn to drive a circuit from scratch. Each car
 sees the world through an 11-beam LiDAR fan, feeds that into a small neural
 network, and gets steering and throttle back. Nobody writes the driving logic —

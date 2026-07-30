@@ -189,10 +189,6 @@ class Track:
         valid = ok & (t >= 0) & (t <= 1) & (u >= 0) & (u <= 1)
         return np.where(valid, t, np.inf)
 
-    def _segment_hits(self, p1, p2):
-        """Parameters t along p1->p2 where it crosses each wall (inf where it misses)."""
-        return self._batch_hits([p1], [p2])[0]
-
     def cast_ray(self, origin, angle_deg):
         """Cast ray from origin at angle. Returns (distance, hit_point)."""
         dists, hits = self.cast_rays(origin, (angle_deg,))

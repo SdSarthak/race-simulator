@@ -122,10 +122,6 @@ class Simulation:
         self.last_active = []
         return self.cars
 
-    def states(self):
-        """Current observation for every car as a (pop_size, state_dim) array."""
-        return np.stack([car.get_state(self.track) for car in self.cars])
-
     # ── stepping ─────────────────────────────────────────────
 
     def _car_active(self, car):
