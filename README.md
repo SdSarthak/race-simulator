@@ -30,9 +30,10 @@ one array operation tests a segment against every wall at once.
 speed-dependent steering, throttle/brake, friction. It casts `NUM_RAYS` rays
 across a 180 degree forward arc every step. Hitting a wall is not instantly
 fatal: the car is teleported back to its last checkpoint, takes a reward
-penalty, and its wall-hit counter goes up. Cars are retired when they collect
-too many hits, crawl for too long, or fail to reach a checkpoint in time — this
-keeps generations short.
+penalty, and its wall-hit counter goes up. Cars are retired when they hit the
+walls repeatedly *without reaching the next checkpoint*, crawl for too long, or
+fail to reach a checkpoint in time — a car that keeps making progress is still
+learning the route, so only genuinely stuck cars are removed.
 
 **The state** the network sees (16 floats by default):
 

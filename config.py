@@ -102,8 +102,11 @@ ISLAND_STAG      = 50     # gens without improvement before island restart
 ISLAND_FRAC      = 0.30   # fraction of bottom population to randomise on restart
 TOURN_K          = 3      # tournament selection: candidates per draw
 
-# Retirement rules — stop simulating cars that will never score again
-MAX_WALL_HITS      = 10   # wall contacts before a car is retired
+# Retirement rules — stop simulating cars that will never score again.
+# The wall-hit rule counts contacts *since the last checkpoint*: a car that
+# keeps making progress is still learning the route, while one that keeps
+# bouncing off the same corner is not.
+SECTOR_WALL_HITS   = 5    # wall contacts since the last checkpoint before retirement
 IDLE_LIMIT_STEPS   = 150  # consecutive steps below IDLE_SPEED before retirement
 STALL_LIMIT_STEPS  = 400  # steps without reaching a checkpoint before retirement
 

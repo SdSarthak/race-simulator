@@ -55,6 +55,7 @@ class Car:
         self.cp_speeds = []       # speed carried through each checkpoint
         self.cp_splits = []       # steps taken between consecutive checkpoints
         self.wall_hits = 0
+        self.sector_wall_hits = 0  # hits since the last checkpoint
         self.total_reward = 0.0
         self._last_cp_step = 0
         self._idle_steps = 0
@@ -142,7 +143,7 @@ class Car:
         """Retire cars that are stuck, stalled or hopeless so a generation ends."""
         if not self.alive:
             return
-        if self.wall_hits >= MAX_WALL_HITS:
+        if self.sector_wall_hits >= SECTOR_WALL_HITS:
             self.alive = False
             self.death_reason = "wall_hits"
         elif self._idle_steps >= IDLE_LIMIT_STEPS:
@@ -177,6 +178,7 @@ class Car:
             return False
         if track.check_collision(self.get_corners()):
             self.wall_hits += 1
+            self.sector_wall_hits += 1
             # Teleport back to midpoint of last checkpoint, face next one
             n_cps = len(track.checkpoints)
             last_cp_idx = (self.next_cp - 1) % n_cps
@@ -218,6 +220,7 @@ class Car:
         self.cp_speeds.append(self.speed)
         self.cp_splits.append(max(1, self.steps - self._last_cp_step))
         self._last_cp_step = self.steps
+        self.sector_wall_hits = 0      # progress earns a clean slate
 
         self.next_cp = (self.next_cp + 1) % n_cps
 

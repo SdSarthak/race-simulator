@@ -5,7 +5,7 @@ import pytest
 
 from config import (
     STATE_DIM, NUM_RAYS, MAX_SPEED, ACCELERATION, FRICTION, IDLE_LIMIT_STEPS,
-    MAX_WALL_HITS, STALL_LIMIT_STEPS, CHECKPOINT_REWARD, LAP_REWARD,
+    SECTOR_WALL_HITS, STALL_LIMIT_STEPS, CHECKPOINT_REWARD, LAP_REWARD,
     CRASH_PENALTY, TOTAL_LAPS,
 )
 from car import Car
@@ -165,11 +165,21 @@ def test_idling_retires_the_car(car, track):
     assert car.death_reason == "idle"
 
 
-def test_repeated_wall_hits_retire_the_car(car, track):
-    car.wall_hits = MAX_WALL_HITS
+def test_repeated_wall_hits_in_one_sector_retire_the_car(car, track):
+    car.sector_wall_hits = SECTOR_WALL_HITS
     car._check_retirement()
     assert car.alive is False
     assert car.death_reason == "wall_hits"
+
+
+def test_reaching_a_checkpoint_forgives_earlier_wall_hits(car, track):
+    _place_on_checkpoint(car, track, 2)
+    car.sector_wall_hits = SECTOR_WALL_HITS - 1
+    car.check_checkpoints(track)
+    assert car.sector_wall_hits == 0
+    car._check_retirement()
+    assert car.alive is True
+    assert car.wall_hits == 0          # the lifetime tally is untouched
 
 
 def test_failing_to_reach_a_checkpoint_retires_the_car(car, track):
