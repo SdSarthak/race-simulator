@@ -1,0 +1,7 @@
+# Core simulation + learning
+numpy>=1.24,<2.0
+torch>=2.0
+
+# Visualiser (raylib provides the `pyray` module).
+# Training with --headless works without it.
+raylib>=5.0

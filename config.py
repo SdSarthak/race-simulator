@@ -10,6 +10,34 @@ same code runs from a checkout, a scratch disk or CI without edits.
 import os as _os
 
 
+def _load_dotenv(path=None):
+    """Load KEY=VALUE lines from a local `.env` without clobbering real env vars.
+
+    Keeps the project dependency-free — no python-dotenv needed.
+    """
+    path = path or _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".env")
+    if not _os.path.isfile(path):
+        return {}
+    loaded = {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key, value = key.strip(), value.strip().strip("'\"")
+                if key and key not in _os.environ:
+                    _os.environ[key] = value
+                    loaded[key] = value
+    except OSError:
+        return {}
+    return loaded
+
+
+_load_dotenv()
+
+
 def _env_int(name, default):
     raw = _os.getenv(name)
     if raw is None or raw.strip() == "":
