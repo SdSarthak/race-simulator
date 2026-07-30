@@ -1,3 +1,25 @@
+"""Central tuning knobs for the race simulator.
+
+Every module reads its constants from here, so a single edit changes the
+physics, the sensors, the learner and the renderer consistently.
+
+Paths can be overridden with environment variables (see `.env.example`) so the
+same code runs from a checkout, a scratch disk or CI without edits.
+"""
+
+import os as _os
+
+
+def _env_int(name, default):
+    raw = _os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 # Window
 WIDTH = 1400
 HEIGHT = 900
@@ -27,19 +49,20 @@ ACCELERATION = 0.50
 BRAKE_FORCE = 0.7
 TURN_RATE = 3.5
 FRICTION = 0.02
+TRAIL_LENGTH = 30        # trail points kept for the exhaust effect
 
 # Sensors
-NUM_RAYS = 11            # increased from 7 — denser LiDAR fan for better spatial awareness
-MAX_RAY_LENGTH = 250     # slightly longer range so the car can see further ahead
-RAY_SPREAD = 180         # full forward hemisphere (was 140°); helps with tight corners
+NUM_RAYS = 11            # denser LiDAR fan for better spatial awareness
+MAX_RAY_LENGTH = 250     # ray range in pixels
+RAY_SPREAD = 180         # full forward hemisphere; helps with tight corners
 
 # Genetic Algorithm
-POP_SIZE         = 40     # doubled from 20 — more diversity, breaks plateaus
+POP_SIZE         = 40     # population per generation
 ELITE_FRACTION   = 0.25   # top fraction survive unchanged
-CROSSOVER_PROB   = 0.50   # higher crossover probability for diversity
+CROSSOVER_PROB   = 0.50   # probability a child is bred rather than cloned
 MUTATION_RATE    = 0.15   # per-weight mutation probability
 MUTATION_STD_P1  = 0.08   # noise std in phase 1 (explore)
-MUTATION_STD_P2  = 0.05   # noise std in phase 2 (slightly larger base for speed search)
+MUTATION_STD_P2  = 0.05   # noise std in phase 2 (speed search)
 NUM_GENERATIONS  = 500
 MAX_STEPS_GEN    = 2500   # max steps before killing a generation
 TOTAL_LAPS       = 3
@@ -51,14 +74,21 @@ ISLAND_STAG      = 50     # gens without improvement before island restart
 ISLAND_FRAC      = 0.30   # fraction of bottom population to randomise on restart
 TOURN_K          = 3      # tournament selection: candidates per draw
 
-# PPO (kept for backward compat / single-car replay)
+# Retirement rules — stop simulating cars that will never score again
+MAX_WALL_HITS      = 10   # wall contacts before a car is retired
+IDLE_LIMIT_STEPS   = 150  # consecutive steps below IDLE_SPEED before retirement
+STALL_LIMIT_STEPS  = 400  # steps without reaching a checkpoint before retirement
+
+# PPO
 LEARNING_RATE = 3e-4
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
-
 CLIP_EPSILON = 0.2
 PPO_EPOCHS = 4
 MINI_BATCH_SIZE = 64
+ENTROPY_COEF = 0.01
+VALUE_COEF = 0.5
+MAX_GRAD_NORM = 0.5
 MAX_STEPS = 2000
 NUM_EPISODES = 3000
 NUM_CARS = POP_SIZE
@@ -75,21 +105,37 @@ STATE_DIM  = NUM_RAYS + 2 + LOOKAHEAD_CPS + 1
 ACTION_DIM = 2   # [steering, throttle]
 
 # Rewards
-CHECKPOINT_REWARD = 3.0    # increased — checkpoints are the primary navigation signal
-LAP_REWARD = 15.0          # increased lap reward
-CRASH_PENALTY = -15.0      # stronger crash deterrent
-SPEED_REWARD = 0.15        # per-step speed bonus (encourages not braking unnecessarily)
-IDLE_PENALTY = -0.2        # stronger idle penalty (was -0.1)
+CHECKPOINT_REWARD = 3.0    # checkpoints are the primary navigation signal
+LAP_REWARD = 15.0
+CRASH_PENALTY = -15.0      # applied on every wall contact
+SPEED_REWARD = 0.15        # per-step speed bonus
+IDLE_PENALTY = -0.2        # per-step penalty for crawling
 IDLE_SPEED = 0.5
 
-# Racing-line reward shaping (new)
+# Phase-2 fitness shaping
+SPLIT_REF_STEPS = 100.0            # sector time (in steps) worth zero split score
+SPLIT_CONSISTENCY_WEIGHT = 0.5     # penalty per step of sector-time std deviation
+WALL_HIT_FITNESS_PENALTY = 10.0    # fitness lost per wall contact
+
+# Racing-line reward shaping
 WALL_PROXIMITY_PENALTY = -0.05   # per step, scaled by how close the nearest wall is
+WALL_PROXIMITY_BAND = 0.3        # normalised ray distance below which the penalty applies
 LOOKAHEAD_ALIGN_REWARD = 0.05    # bonus when heading aligns with the next-next checkpoint
 CP_SPEED_BONUS_SCALE = 0.08      # bonus = speed/MAX_SPEED * this, awarded at each checkpoint
 
-# Paths
-MODEL_DIR = "models"
-BEST_MODEL = "models/best.pt"
+# Rendering
+FAST_STEPS = _env_int("RACE_SIM_FAST_STEPS", 500)   # physics ticks per frame in fast mode
+
+# Paths (env-overridable)
+MODEL_DIR  = _os.getenv("RACE_SIM_MODEL_DIR", "models")
+LOG_DIR    = _os.getenv("RACE_SIM_LOG_DIR", "logs")
+BEST_MODEL = _os.getenv("RACE_SIM_BEST_MODEL", _os.path.join(MODEL_DIR, "best.pt"))
+CHECKPOINT_EVERY = _env_int("RACE_SIM_CHECKPOINT_EVERY", 50)  # gens between snapshots
+
+# Reproducibility — leave unset for a random seed each run
+SEED = _env_int("RACE_SIM_SEED", -1)
+if SEED < 0:
+    SEED = None
 
 # Car colors for multi-car
 CAR_COLORS = [ORANGE, CYAN, MAGENTA, GREEN, RED]
