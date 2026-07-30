@@ -1,0 +1,44 @@
+name: tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        # The test suite is headless, so raylib is not installed here.
+        # The CPU wheel of torch keeps the job small and fast.
+        run: |
+          python -m pip install --upgrade pip
+          pip install "numpy>=1.24,<2.0" pytest
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Smoke test the headless trainer
+        run: |
+          python main.py train --headless --algo ga --generations 2 --pop 6 \
+            --max-steps 120 --laps 1 --seed 1 --model /tmp/ga.pt \
+            --checkpoint-every 0 --log-dir ""
+          python main.py train --headless --algo ppo --generations 2 --pop 6 \
+            --max-steps 120 --laps 1 --seed 1 --model /tmp/ppo.pt \
+            --checkpoint-every 0 --log-dir ""
+          python main.py evaluate --model /tmp/ga.pt --max-steps 120 --laps 1
