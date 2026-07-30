@@ -164,47 +164,72 @@ class Track:
         self._wdx = ends[:, 0] - starts[:, 0]
         self._wdy = ends[:, 1] - starts[:, 1]
 
+    def _batch_hits(self, starts, ends):
+        """Crossing parameters for K segments against every wall.
+
+        Returns a (K, W) array holding t along each segment where it crosses
+        wall w, and `inf` where it misses. Parallel segments are never hits, so
+        the denominator is clamped rather than guarded — that keeps the whole
+        thing branch-free and out of numpy's error machinery.
+        """
+        starts = np.asarray(starts, dtype=np.float64).reshape(-1, 2)
+        ends = np.asarray(ends, dtype=np.float64).reshape(-1, 2)
+        dx = (ends[:, 0] - starts[:, 0])[:, None]
+        dy = (ends[:, 1] - starts[:, 1])[:, None]
+        rx = starts[:, 0][:, None] - self._wx[None, :]
+        ry = starts[:, 1][:, None] - self._wy[None, :]
+
+        denom = dx * self._wdy[None, :] - dy * self._wdx[None, :]
+        ok = np.abs(denom) > _EPS
+        safe = np.where(ok, denom, 1.0)
+
+        t = (self._wdx[None, :] * ry - self._wdy[None, :] * rx) / safe
+        u = (dx * ry - dy * rx) / safe
+
+        valid = ok & (t >= 0) & (t <= 1) & (u >= 0) & (u <= 1)
+        return np.where(valid, t, np.inf)
+
     def _segment_hits(self, p1, p2):
         """Parameters t along p1->p2 where it crosses each wall (inf where it misses)."""
-        x1, y1 = p1
-        dx, dy = p2[0] - x1, p2[1] - y1
-
-        denom = self._wdy * dx - self._wdx * dy
-        rx = x1 - self._wx
-        ry = y1 - self._wy
-        t_num = self._wdx * ry - self._wdy * rx
-        u_num = dx * ry - dy * rx
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            t = t_num / denom
-            u = u_num / denom
-
-        valid = (np.abs(denom) > _EPS) & (t >= 0) & (t <= 1) & (u >= 0) & (u <= 1)
-        return np.where(valid, t, np.inf)
+        return self._batch_hits([p1], [p2])[0]
 
     def cast_ray(self, origin, angle_deg):
         """Cast ray from origin at angle. Returns (distance, hit_point)."""
-        rad = math.radians(angle_deg)
-        end = (origin[0] + math.cos(rad) * MAX_RAY_LENGTH,
-               origin[1] + math.sin(rad) * MAX_RAY_LENGTH)
+        dists, hits = self.cast_rays(origin, (angle_deg,))
+        return float(dists[0]), (float(hits[0][0]), float(hits[0][1]))
 
-        t = self._segment_hits(origin, end)
-        t_min = float(t.min()) if t.size else np.inf
+    def cast_rays(self, origin, angles_deg):
+        """Cast a whole fan at once. Returns (distances, hit_points array).
 
-        if not np.isfinite(t_min):
-            return float(MAX_RAY_LENGTH), end
+        All rays share an origin, so the wall tests collapse into two (R x W)
+        array operations instead of R x W python-level intersections.
+        """
+        ang = np.radians(np.asarray(angles_deg, dtype=np.float64))
+        dx = np.cos(ang) * MAX_RAY_LENGTH
+        dy = np.sin(ang) * MAX_RAY_LENGTH
 
-        return (t_min * MAX_RAY_LENGTH,
-                (origin[0] + t_min * (end[0] - origin[0]),
-                 origin[1] + t_min * (end[1] - origin[1])))
+        x1, y1 = origin
+        rx = x1 - self._wx                      # (W,)
+        ry = y1 - self._wy
+
+        denom = np.outer(dx, self._wdy) - np.outer(dy, self._wdx)   # (R, W)
+        ok = np.abs(denom) > _EPS
+        safe = np.where(ok, denom, 1.0)
+
+        t = (self._wdx * ry - self._wdy * rx)[None, :] / safe       # (R, W)
+        u = (np.outer(dx, ry) - np.outer(dy, rx)) / safe
+
+        valid = ok & (t >= 0) & (t <= 1) & (u >= 0) & (u <= 1)
+        t_min = np.where(valid, t, np.inf).min(axis=1)
+        t_hit = np.where(np.isfinite(t_min), t_min, 1.0)
+
+        hits = np.stack([x1 + t_hit * dx, y1 + t_hit * dy], axis=1)
+        return t_hit * MAX_RAY_LENGTH, hits
 
     def check_collision(self, corners):
-        """Check if any edge of a rectangle (4 corners) hits a wall."""
-        for i in range(len(corners)):
-            j = (i + 1) % len(corners)
-            if np.isfinite(self._segment_hits(corners[i], corners[j])).any():
-                return True
-        return False
+        """Check if any edge of a closed polygon (e.g. a car's 4 corners) hits a wall."""
+        pts = np.asarray(corners, dtype=np.float64)
+        return bool(np.isfinite(self._batch_hits(pts, np.roll(pts, -1, axis=0))).any())
 
     def check_checkpoint(self, prev_pos, curr_pos, cp_idx):
         """Check if movement from prev to curr crosses checkpoint cp_idx."""

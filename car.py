@@ -4,6 +4,10 @@ import numpy as np
 
 from config import *
 
+# Ray angles relative to the car's heading, computed once.
+RAY_OFFSETS = (np.linspace(-RAY_SPREAD / 2, RAY_SPREAD / 2, NUM_RAYS)
+               if NUM_RAYS > 1 else np.zeros(1))
+
 
 class Car:
     """A single agent-controlled car: physics, LiDAR sensing and lap telemetry.
@@ -112,11 +116,13 @@ class Car:
             return 0.0
 
         self.update(steering, throttle, dt)
-        self.cast_rays(track)
 
         reward = 0.0
         if self.check_collision(track):
             reward += CRASH_PENALTY
+        # Sense after any crash teleport, so the state fed to the policy on the
+        # next step describes where the car actually is.
+        self.cast_rays(track)
         reward += self.check_checkpoints(track)
         reward += self.get_shaping_reward(track)
 
@@ -149,14 +155,9 @@ class Car:
     # ── sensors ──────────────────────────────────────────────
 
     def cast_rays(self, track):
-        origin = (self.x, self.y)
-        start = self.angle - RAY_SPREAD / 2
-        step = RAY_SPREAD / (NUM_RAYS - 1) if NUM_RAYS > 1 else 0
-
-        for i in range(NUM_RAYS):
-            d, hp = track.cast_ray(origin, start + i * step)
-            self.ray_dists[i] = d / MAX_RAY_LENGTH
-            self.ray_hits[i] = hp
+        dists, hits = track.cast_rays((self.x, self.y), self.angle + RAY_OFFSETS)
+        self.ray_dists = (dists / MAX_RAY_LENGTH).tolist()
+        self.ray_hits = [tuple(p) for p in hits.tolist()]
 
     # ── collision / checkpoints ──────────────────────────────
 

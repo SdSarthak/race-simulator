@@ -3,6 +3,7 @@ import math
 import os
 import random
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.distributions import Normal
@@ -52,6 +53,44 @@ class PolicyNet(nn.Module):
         lps = dist.log_prob(actions).sum(-1)
         ent = dist.entropy().sum(-1)
         return lps, vals.squeeze(-1), ent
+
+
+# ── batched population inference ─────────────────────────────
+
+class BatchedPolicy:
+    """A numpy snapshot of a whole population, evaluated in one shot.
+
+    The genetic trainer holds the weights fixed for an entire generation, so
+    per-car `torch` forward passes are pure overhead: this stacks every net's
+    weights and drives the whole field with three matrix products per step.
+    Output matches `PolicyNet.act(..., deterministic=True)`.
+    """
+
+    def __init__(self, nets):
+        if not nets:
+            raise ValueError("BatchedPolicy needs at least one network")
+
+        def stack(getter):
+            return np.stack([getter(n).detach().numpy().astype(np.float32)
+                             for n in nets])
+
+        self.w1 = stack(lambda n: n.shared[0].weight)     # (P, H, S)
+        self.b1 = stack(lambda n: n.shared[0].bias)       # (P, H)
+        self.w2 = stack(lambda n: n.shared[2].weight)     # (P, H2, H)
+        self.b2 = stack(lambda n: n.shared[2].bias)
+        self.wm = stack(lambda n: n.actor_mean.weight)    # (P, A, H2)
+        self.bm = stack(lambda n: n.actor_mean.bias)
+        self.pop_size = len(nets)
+
+    def actions(self, states):
+        """states: (P, state_dim) -> (P, action_dim) in [-1, 1]."""
+        x = np.asarray(states, dtype=np.float32)
+        if x.shape[0] != self.pop_size:
+            raise ValueError(
+                f"expected {self.pop_size} states, got {x.shape[0]}")
+        h = np.maximum(np.einsum("phs,ps->ph", self.w1, x) + self.b1, 0.0)
+        h = np.maximum(np.einsum("pkh,ph->pk", self.w2, h) + self.b2, 0.0)
+        return np.tanh(np.einsum("pah,ph->pa", self.wm, h) + self.bm)
 
 
 # ── checkpoint helpers ───────────────────────────────────────
@@ -127,11 +166,18 @@ class GeneticAgent:
         self.phase      = 1   # 1 = learn route, 2 = optimise speed
         self._stag      = 0
         self._last_best = -float('inf')
+        self._batched   = None
 
     # ── interface ─────────────────────────────────────────────
 
     def get_action(self, car_idx: int, state):
         return self.nets[car_idx % self.pop_size].act(state, deterministic=True)[0]
+
+    def get_actions(self, states):
+        """Drive the whole population from a (pop_size, state_dim) array."""
+        if self._batched is None:
+            self._batched = BatchedPolicy(self.nets)
+        return self._batched.actions(states)
 
     def _tournament(self, fitnesses: list) -> int:
         """Return one index via tournament selection (pick best of TOURN_K random candidates)."""
@@ -189,6 +235,7 @@ class GeneticAgent:
             new_nets.append(child)
 
         self.nets = new_nets
+        self._batched = None          # weights changed; drop the cached snapshot
         return top_fit, sum(fitnesses) / self.pop_size
 
     # ── internals ─────────────────────────────────────────────
@@ -264,6 +311,7 @@ class GeneticAgent:
         for net in self.nets:
             net.load_state_dict(copy.deepcopy(state))
         self.best_net.load_state_dict(state)
+        self._batched = None
         self.generation = meta.get("generation", self.generation)
         self.phase = meta.get("phase", self.phase)
         return meta

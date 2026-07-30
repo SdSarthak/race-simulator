@@ -128,14 +128,25 @@ class Simulation:
         if self.generation_done:
             return True
 
-        any_active = False
-        for i, car in enumerate(self.cars):
-            if not self._car_active(car):
-                continue
-            any_active = True
-            action = self.agent.get_action(i, car.get_state(self.track))
-            car.step(self.track, float(action[0]), float(action[1]))
+        active = [i for i, car in enumerate(self.cars) if self._car_active(car)]
+        if active:
+            batched = getattr(self.agent, "get_actions", None)
+            if batched is not None:
+                # One matrix pass drives the whole field; idle rows stay zeroed.
+                states = np.zeros((len(self.cars), STATE_DIM), dtype=np.float32)
+                for i in active:
+                    states[i] = self.cars[i].get_state(self.track)
+                actions = batched(states)
+                for i in active:
+                    self.cars[i].step(self.track,
+                                      float(actions[i][0]), float(actions[i][1]))
+            else:
+                for i in active:
+                    car = self.cars[i]
+                    action = self.agent.get_action(i, car.get_state(self.track))
+                    car.step(self.track, float(action[0]), float(action[1]))
 
+        any_active = bool(active)
         self.step_count += 1
         if not any_active or self.step_count >= self.max_steps:
             self.generation_done = True
