@@ -280,6 +280,7 @@ def train_rendered(trainer, generations, fast=True, show_rays=True):
     render = True
     phase2_flash = 0
     last = None
+    final_gen = trainer.generation + generations
 
     try:
         for _ in range(generations):
@@ -308,14 +309,17 @@ def train_rendered(trainer, generations, fast=True, show_rays=True):
                     draw_track(sim.track, best_car.next_cp if best_car else -1)
                     draw_cars(sim.cars, best_idx if show_rays else -1)
                     draw_sensor_bar(best_car)
-                    draw_status([
-                        f"Gen {trainer.generation + 1}/{trainer.generation + generations}"
-                        if last is None else
-                        f"Gen {trainer.generation + 1}  (last fit {last.best_fitness:,.0f})",
-                        f"Phase {trainer.phase}   Step {sim.step_count}/{sim.max_steps}",
-                        f"Alive {sum(1 for c in sim.cars if c.alive)}/{len(sim.cars)}"
-                        f"   Best CP {max((c.total_cps for c in sim.cars), default=0)}",
-                    ])
+                    status = [
+                        f"Gen {trainer.generation + 1}/{final_gen}"
+                        f"   Phase {trainer.phase}",
+                        f"Step {sim.step_count}/{sim.max_steps}"
+                        f"   Alive {sum(1 for c in sim.cars if c.alive)}/{len(sim.cars)}",
+                        f"Best CP {max((c.total_cps for c in sim.cars), default=0)}"
+                        f"   Laps {max((c.lap for c in sim.cars), default=0)}",
+                    ]
+                    if last is not None:
+                        status.append(f"Last fitness {last.best_fitness:,.0f}")
+                    draw_status(status)
                     if phase2_flash > 0:
                         _draw_phase2_banner()
                         phase2_flash -= 1
