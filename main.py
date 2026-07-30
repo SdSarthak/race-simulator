@@ -39,6 +39,9 @@ def build_parser():
 
     train = sub.add_parser("train", help="evolve a population of drivers")
     _common_args(train)
+    train.add_argument("--algo", choices=("ga", "ppo"), default="ga",
+                       help="ga: neuroevolution (default). "
+                            "ppo: gradient-based policy optimisation")
     train.add_argument("--generations", type=int, default=NUM_GENERATIONS)
     train.add_argument("--pop", type=int, default=POP_SIZE,
                        help="population size (cars per generation)")
@@ -74,18 +77,21 @@ def build_parser():
 # ── commands ─────────────────────────────────────────────────
 
 def cmd_train(args):
-    from ai import GeneticAgent
-    from simulation import Simulation, Trainer, set_seed
+    from ai import GeneticAgent, PPOAgent
+    from simulation import Simulation, Trainer, PPOTrainer, set_seed
     from track import Track
 
     set_seed(args.seed)
     track = Track(args.layout)
-    agent = GeneticAgent(STATE_DIM, ACTION_DIM, pop_size=args.pop)
+    agent_cls = PPOAgent if args.algo == "ppo" else GeneticAgent
+    trainer_cls = PPOTrainer if args.algo == "ppo" else Trainer
+
+    agent = agent_cls(STATE_DIM, ACTION_DIM, pop_size=args.pop)
     sim = Simulation(track, agent, pop_size=args.pop,
                      total_laps=args.laps, max_steps=args.max_steps)
-    trainer = Trainer(agent, sim, model_path=args.model,
-                      log_dir=args.log_dir or None, quiet=args.quiet,
-                      checkpoint_every=args.checkpoint_every)
+    trainer = trainer_cls(agent, sim, model_path=args.model,
+                          log_dir=args.log_dir or None, quiet=args.quiet,
+                          checkpoint_every=args.checkpoint_every)
 
     if not args.no_resume and os.path.exists(args.model):
         try:

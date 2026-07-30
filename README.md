@@ -51,6 +51,14 @@ mutation. Two anti-plateau mechanisms are built in: the mutation std is bumped
 after `STAG_LIM` generations without improvement, and after `ISLAND_STAG` the
 bottom `ISLAND_FRAC` of the population is replaced with fresh random networks.
 
+A gradient-based trainer ships alongside it: `--algo ppo` runs proximal policy
+optimisation over the same network, treating every car in the field as a
+parallel environment for one shared policy. It uses the critic head and the
+per-step reward signal that the genetic trainer ignores (checkpoints, laps,
+crashes, wall proximity, racing-line alignment). The genetic trainer is the
+default and the one the reward weights were tuned around; PPO is there to
+compare against.
+
 Fitness runs in two phases. Phase 1 only cares about getting round —
 `laps * 10000 + checkpoints * 100 + speed`. The moment any car completes
 `TOTAL_LAPS`, the trainer flips to phase 2, which balances lap completion, best
@@ -86,6 +94,7 @@ pytest -q
 python main.py train --headless --generations 300
 python main.py train --pop 60 --laps 3 --layout oval --seed 42
 python main.py train --slow                  # visualiser at 1x instead of fast-forward
+python main.py train --headless --algo ppo   # gradient-based trainer instead
 ```
 
 Training resumes from `models/best.pt` when it exists (`--no-resume` to start
@@ -136,7 +145,7 @@ this project.
 | `simulation.py` | headless population runner + `Trainer` (evolution, logging, checkpoints) |
 | `car.py` | physics, LiDAR, checkpoints, reward and telemetry |
 | `track.py` | layouts, vectorised ray casting and collision |
-| `ai.py` | `PolicyNet`, `GeneticAgent`, `PolicyAgent`, checkpoint I/O |
+| `ai.py` | `PolicyNet`, `GeneticAgent`, `PPOAgent`, `PolicyAgent`, checkpoint I/O |
 | `renderer.py` | raylib visualiser — draws the very objects the trainer scores |
 | `config.py` | all tunables, env overrides, `.env` loading |
 | `tests/` | deterministic tests, no downloads, no display |

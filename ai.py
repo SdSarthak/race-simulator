@@ -317,6 +317,145 @@ class GeneticAgent:
         return meta
 
 
+# ── PPO ──────────────────────────────────────────────────────
+
+def compute_gae(rewards, values, dones, last_value,
+                gamma=GAMMA, lam=GAE_LAMBDA):
+    """Generalised advantage estimation for one trajectory.
+
+    `dones[t]` is 1.0 when the episode ended at step t (no bootstrap through
+    it). `last_value` bootstraps a trajectory that was merely cut short.
+    Returns (advantages, returns).
+    """
+    rewards = np.asarray(rewards, dtype=np.float64)
+    values = np.asarray(values, dtype=np.float64)
+    dones = np.asarray(dones, dtype=np.float64)
+    if not (len(rewards) == len(values) == len(dones)):
+        raise ValueError("rewards, values and dones must be the same length")
+
+    advantages = np.zeros_like(rewards)
+    gae = 0.0
+    for t in range(len(rewards) - 1, -1, -1):
+        next_value = last_value if t == len(rewards) - 1 else values[t + 1]
+        non_terminal = 1.0 - dones[t]
+        delta = rewards[t] + gamma * next_value * non_terminal - values[t]
+        gae = delta + gamma * lam * non_terminal * gae
+        advantages[t] = gae
+    return advantages, advantages + values
+
+
+class PPOAgent:
+    """Proximal policy optimisation over the same `PolicyNet`.
+
+    An alternative to the genetic trainer: every car in the field is treated as
+    a parallel environment, all of them driven by (and training) one shared
+    network. Actions are sampled during rollouts and averaged at replay time.
+    """
+
+    def __init__(self, state_dim, action_dim, pop_size=POP_SIZE,
+                 lr=LEARNING_RATE, deterministic=False):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.pop_size = pop_size
+        self.deterministic = deterministic
+        self.net = PolicyNet(state_dim, action_dim)
+        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=lr)
+        self.generation = 0
+        self.phase = 1
+        self.last_log_probs = np.zeros(pop_size, dtype=np.float32)
+        self.last_values = np.zeros(pop_size, dtype=np.float32)
+
+    # ── rollout ───────────────────────────────────────────────
+
+    def get_actions(self, states):
+        """Sample an action per car, remembering log-probs and value estimates."""
+        with torch.no_grad():
+            x = torch.as_tensor(np.asarray(states, dtype=np.float32))
+            mean, values = self.net(x)
+            if self.deterministic:
+                actions = mean
+                log_probs = torch.zeros(len(x))
+            else:
+                dist = Normal(mean, torch.exp(self.net.actor_log_std))
+                actions = torch.clamp(dist.sample(), -1.0, 1.0)
+                log_probs = dist.log_prob(actions).sum(-1)
+
+        self.last_log_probs = log_probs.numpy()
+        self.last_values = values.squeeze(-1).numpy()
+        return actions.numpy()
+
+    def get_action(self, car_idx, state):
+        return self.get_actions(np.asarray(state)[None, :])[0]
+
+    def value_of(self, states):
+        with torch.no_grad():
+            _, values = self.net(torch.as_tensor(np.asarray(states, dtype=np.float32)))
+        return values.squeeze(-1).numpy()
+
+    # ── learning ──────────────────────────────────────────────
+
+    def update(self, states, actions, log_probs, advantages, returns,
+               epochs=PPO_EPOCHS, batch_size=MINI_BATCH_SIZE):
+        """Run the clipped-surrogate update. Returns a dict of mean losses."""
+        states = torch.as_tensor(np.asarray(states, dtype=np.float32))
+        actions = torch.as_tensor(np.asarray(actions, dtype=np.float32))
+        old_log_probs = torch.as_tensor(np.asarray(log_probs, dtype=np.float32))
+        returns_t = torch.as_tensor(np.asarray(returns, dtype=np.float32))
+        adv = torch.as_tensor(np.asarray(advantages, dtype=np.float32))
+        if len(states) == 0:
+            return {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
+        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+
+        totals = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
+        batches = 0
+        for _ in range(epochs):
+            order = torch.randperm(len(states))
+            for start in range(0, len(states), batch_size):
+                idx = order[start:start + batch_size]
+                new_log_probs, values, entropy = self.net.evaluate(
+                    states[idx], actions[idx])
+
+                ratio = torch.exp(new_log_probs - old_log_probs[idx])
+                unclipped = ratio * adv[idx]
+                clipped = torch.clamp(ratio, 1 - CLIP_EPSILON,
+                                      1 + CLIP_EPSILON) * adv[idx]
+                policy_loss = -torch.min(unclipped, clipped).mean()
+                value_loss = ((values - returns_t[idx]) ** 2).mean()
+                entropy_mean = entropy.mean()
+
+                loss = (policy_loss
+                        + VALUE_COEF * value_loss
+                        - ENTROPY_COEF * entropy_mean)
+
+                self.optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.net.parameters(), MAX_GRAD_NORM)
+                self.optimizer.step()
+
+                totals["policy_loss"] += policy_loss.detach().item()
+                totals["value_loss"] += value_loss.detach().item()
+                totals["entropy"] += entropy_mean.detach().item()
+                batches += 1
+
+        return {k: v / max(batches, 1) for k, v in totals.items()}
+
+    # ── persistence ───────────────────────────────────────────
+
+    def save(self, path: str, **meta):
+        meta.setdefault("generation", self.generation)
+        meta.setdefault("phase", self.phase)
+        meta.setdefault("algo", "ppo")
+        return save_checkpoint(self.net.state_dict(), path,
+                               self.state_dim, self.action_dim, **meta)
+
+    def load(self, path: str):
+        state, meta = load_checkpoint(path, self.state_dim, self.action_dim)
+        self.net.load_state_dict(state)
+        self.generation = meta.get("generation", self.generation)
+        self.phase = meta.get("phase", self.phase)
+        return meta
+
+
 # ── single-network agent (replay / evaluation) ───────────────
 
 class PolicyAgent:

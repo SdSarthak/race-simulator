@@ -49,6 +49,8 @@ class GenerationStats:
     alive_cars: int
     best_lap_time: float
     wall_hits: int
+    policy_loss: float = 0.0     # PPO only; zero for the genetic trainer
+    value_loss: float = 0.0
 
     def as_row(self):
         return asdict(self)
@@ -75,6 +77,7 @@ class Simulation:
         self.cars = []
         self.step_count = 0
         self.generation_done = True
+        self.observer = None      # optional per-tick hook (see PPOTrainer)
         self.reset()
 
     # ── spawning ─────────────────────────────────────────────
@@ -113,7 +116,15 @@ class Simulation:
             car.cast_rays(self.track)
         self.step_count = 0
         self.generation_done = False
+        self.last_states = np.zeros((len(self.cars), STATE_DIM), dtype=np.float32)
+        self.last_actions = np.zeros((len(self.cars), ACTION_DIM), dtype=np.float32)
+        self.last_rewards = np.zeros(len(self.cars), dtype=np.float32)
+        self.last_active = []
         return self.cars
+
+    def states(self):
+        """Current observation for every car as a (pop_size, state_dim) array."""
+        return np.stack([car.get_state(self.track) for car in self.cars])
 
     # ── stepping ─────────────────────────────────────────────
 
@@ -128,28 +139,40 @@ class Simulation:
         if self.generation_done:
             return True
 
+        n = len(self.cars)
         active = [i for i, car in enumerate(self.cars) if self._car_active(car)]
+        states = np.zeros((n, STATE_DIM), dtype=np.float32)
+        actions = np.zeros((n, ACTION_DIM), dtype=np.float32)
+        rewards = np.zeros(n, dtype=np.float32)
+
         if active:
             batched = getattr(self.agent, "get_actions", None)
             if batched is not None:
                 # One matrix pass drives the whole field; idle rows stay zeroed.
-                states = np.zeros((len(self.cars), STATE_DIM), dtype=np.float32)
                 for i in active:
                     states[i] = self.cars[i].get_state(self.track)
-                actions = batched(states)
-                for i in active:
-                    self.cars[i].step(self.track,
-                                      float(actions[i][0]), float(actions[i][1]))
+                actions = np.asarray(batched(states), dtype=np.float32)
             else:
                 for i in active:
-                    car = self.cars[i]
-                    action = self.agent.get_action(i, car.get_state(self.track))
-                    car.step(self.track, float(action[0]), float(action[1]))
+                    states[i] = self.cars[i].get_state(self.track)
+                    actions[i] = self.agent.get_action(i, states[i])
+
+            for i in active:
+                rewards[i] = self.cars[i].step(
+                    self.track, float(actions[i][0]), float(actions[i][1]))
+
+        # Kept so learners that need transitions (PPO) can read them back.
+        self.last_states = states
+        self.last_actions = actions
+        self.last_rewards = rewards
+        self.last_active = active
 
         any_active = bool(active)
         self.step_count += 1
         if not any_active or self.step_count >= self.max_steps:
             self.generation_done = True
+        if self.observer is not None:
+            self.observer(self)
         return self.generation_done
 
     def run(self):
@@ -229,13 +252,21 @@ class Trainer:
         self.phase_changed = False
         return self.sim.reset()
 
+    def _learn(self, cars):
+        """Turn a finished generation into a new policy.
+
+        Returns (best_fitness, avg_fitness, extra_stats).
+        """
+        best_fit, avg_fit = self.agent.evolve(cars)
+        return best_fit, avg_fit, {}
+
     def finish_generation(self):
-        """Score the field, evolve, persist, and return this generation's stats."""
+        """Score the field, learn from it, persist, and return the stats."""
         cars = self.sim.cars
         self.generation += 1
         self.agent.generation = self.generation
 
-        best_fit, avg_fit = self.agent.evolve(cars)
+        best_fit, avg_fit, extra = self._learn(cars)
 
         best_time = self.sim.best_lap_time()
         self.global_best_time = min(self.global_best_time, best_time)
@@ -254,6 +285,8 @@ class Trainer:
             alive_cars=sum(1 for c in cars if c.alive),
             best_lap_time=self.global_best_time,
             wall_hits=sum(c.wall_hits for c in cars),
+            policy_loss=extra.get("policy_loss", 0.0),
+            value_loss=extra.get("value_loss", 0.0),
         )
 
         if best_fit > self.best_fitness_ever:
@@ -303,6 +336,77 @@ class Trainer:
         self.agent.generation = self.generation
         self.agent.phase = self.phase
         return meta
+
+
+class PPOTrainer(Trainer):
+    """Trainer variant that learns by gradient descent instead of evolution.
+
+    Every car is a parallel environment for one shared network. Transitions are
+    recorded through the simulation's per-tick observer hook, so the rendered
+    and headless loops both feed the learner without knowing about it.
+    """
+
+    def __init__(self, agent, simulation, **kwargs):
+        super().__init__(agent, simulation, **kwargs)
+        self._buffers = []
+        self._active_before = []
+        simulation.observer = self._record
+
+    # ── rollout collection ───────────────────────────────────
+
+    def begin_generation(self):
+        cars = super().begin_generation()
+        self._buffers = [{"states": [], "actions": [], "log_probs": [],
+                          "values": [], "rewards": [], "dones": []}
+                         for _ in cars]
+        return cars
+
+    def _record(self, sim):
+        log_probs = getattr(self.agent, "last_log_probs", None)
+        values = getattr(self.agent, "last_values", None)
+        if log_probs is None or values is None:
+            return
+        for i in sim.last_active:
+            done = not sim._car_active(sim.cars[i])
+            buf = self._buffers[i]
+            buf["states"].append(sim.last_states[i])
+            buf["actions"].append(sim.last_actions[i])
+            buf["log_probs"].append(float(log_probs[i]))
+            buf["values"].append(float(values[i]))
+            buf["rewards"].append(float(sim.last_rewards[i]))
+            buf["dones"].append(1.0 if done else 0.0)
+
+    # ── learning ─────────────────────────────────────────────
+
+    def _learn(self, cars):
+        from ai import compute_gae
+
+        states, actions, log_probs, advantages, returns = [], [], [], [], []
+        for i, buf in enumerate(self._buffers):
+            if not buf["rewards"]:
+                continue
+            # A car still running when the generation was cut short gets a
+            # bootstrapped value; one that died or finished ends at zero.
+            if buf["dones"][-1] >= 1.0:
+                last_value = 0.0
+            else:
+                last_value = float(self.agent.value_of(
+                    cars[i].get_state(self.sim.track)[None, :])[0])
+
+            adv, ret = compute_gae(buf["rewards"], buf["values"],
+                                   buf["dones"], last_value)
+            states.extend(buf["states"])
+            actions.extend(buf["actions"])
+            log_probs.extend(buf["log_probs"])
+            advantages.extend(adv)
+            returns.extend(ret)
+
+        losses = self.agent.update(states, actions, log_probs,
+                                   advantages, returns)
+        rewards = [c.total_reward for c in cars]
+        best = max(rewards, default=0.0)
+        avg = sum(rewards) / len(rewards) if rewards else 0.0
+        return best, avg, losses
 
 
 def build(agent_cls=None, layout="circuit", pop_size=POP_SIZE,
