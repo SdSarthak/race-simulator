@@ -113,15 +113,34 @@ def save_checkpoint(state_dict, path, state_dim, action_dim, **meta):
 def load_checkpoint(path, state_dim=None, action_dim=None):
     """Read a checkpoint, tolerating the older bare-state_dict format.
 
+    Loaded with `weights_only=True`: a checkpoint is tensors plus a handful of
+    scalars, so there is never a reason to let one execute arbitrary pickle
+    payloads just because it was downloaded from somewhere.
+
     Returns (state_dict, metadata).
     """
-    obj = torch.load(path, map_location="cpu", weights_only=False)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"no checkpoint at {path}")
+    try:
+        obj = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception as exc:                    # noqa: BLE001 - re-raised below
+        raise ValueError(
+            f"{path} is not a readable checkpoint ({type(exc).__name__}: {exc}). "
+            "It may be truncated, from another tool, or saved with objects that "
+            "a weights-only load refuses. Retrain or point --model elsewhere."
+        ) from exc
 
     if isinstance(obj, dict) and "state_dict" in obj:
         state = obj["state_dict"]
         meta = {k: v for k, v in obj.items() if k != "state_dict"}
     else:                                    # legacy: raw state_dict
         state, meta = obj, {}
+
+    if not isinstance(state, dict) or not all(
+            isinstance(v, torch.Tensor) for v in state.values()):
+        raise ValueError(
+            f"checkpoint {path} does not contain a network state_dict; "
+            "it is probably a log, a dataset or a file from another project.")
 
     saved_dim = meta.get("state_dim")
     if state_dim is not None and saved_dim is not None and saved_dim != state_dim:
@@ -154,12 +173,16 @@ class GeneticAgent:
     - Island restart: randomise bottom ISLAND_FRAC of population after ISLAND_STAG gens
     """
 
-    def __init__(self, state_dim, action_dim, pop_size=POP_SIZE):
+    def __init__(self, state_dim, action_dim, pop_size=POP_SIZE,
+                 total_laps=TOTAL_LAPS):
         if pop_size < 2:
             raise ValueError("pop_size must be at least 2")
         self.state_dim  = state_dim
         self.action_dim = action_dim
         self.pop_size   = pop_size
+        # Phase-2 fitness normalises by the race distance actually being run,
+        # which the CLI can change with --laps.
+        self.total_laps = max(1, int(total_laps))
         self.nets = [PolicyNet(state_dim, action_dim) for _ in range(pop_size)]
         self.best_net   = copy.deepcopy(self.nets[0])
         self.generation = 0
@@ -190,10 +213,18 @@ class GeneticAgent:
             raise ValueError(f"expected {self.pop_size} cars, got {len(cars)}")
 
         self.generation += 1
-        fitnesses = [self._fitness(c) for c in cars]
+        # A network that has gone numerically unstable scores NaN, and NaN loses
+        # every comparison, so `sorted`/`max` would rank it arbitrarily — and
+        # could crown it. Map non-finite scores to -inf so they always sort last.
+        fitnesses = [f if math.isfinite(f) else -float("inf")
+                     for f in (self._fitness(c) for c in cars)]
         order     = sorted(range(self.pop_size), key=lambda i: fitnesses[i], reverse=True)
 
-        elite_n   = min(self.pop_size, max(2, int(self.pop_size * ELITE_FRACTION)))
+        # Cap the elite at pop_size - 1: at pop_size == 2 an unclamped quota of 2
+        # filled the next generation entirely with untouched survivors, so the
+        # population could never mutate and the search stood still forever.
+        elite_n   = min(max(2, int(self.pop_size * ELITE_FRACTION)),
+                        max(1, self.pop_size - 1))
         elite_idx = order[:elite_n]
 
         self.best_net = copy.deepcopy(self.nets[elite_idx[0]])
@@ -248,14 +279,15 @@ class GeneticAgent:
 
         # Phase 2: balanced multi-signal fitness.
         # All terms scaled to ~0-1000 so no single term dominates.
+        laps_target = self.total_laps
         score = 0.0
 
         # 1. Lap completion (capped so it doesn't drown other signals)
-        score += min(car.lap, TOTAL_LAPS) * (1000.0 / max(TOTAL_LAPS, 1))
+        score += min(car.lap, laps_target) * (1000.0 / laps_target)
 
         # 2. Checkpoint progress as fraction of total possible
         cps_per_lap = getattr(car, "num_cps", 0) or 1
-        total_possible = max(1, TOTAL_LAPS * cps_per_lap)
+        total_possible = max(1, laps_target * cps_per_lap)
         score += min(1.0, car.total_cps / total_possible) * 500
 
         # 3. Best lap time (lower = better): 2s -> 880, 5s -> 700
@@ -364,6 +396,7 @@ class PPOAgent:
         self.phase = 1
         self.last_log_probs = np.zeros(pop_size, dtype=np.float32)
         self.last_values = np.zeros(pop_size, dtype=np.float32)
+        self.skipped_updates = 0   # mini-batches dropped for a non-finite loss
 
     # ── rollout ───────────────────────────────────────────────
 
@@ -404,7 +437,14 @@ class PPOAgent:
         adv = torch.as_tensor(np.asarray(advantages, dtype=np.float32))
         if len(states) == 0:
             return {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
-        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+
+        # torch.std() is Bessel-corrected, so a single transition gives NaN.
+        # Normalising by it produced NaN advantages, NaN gradients and a network
+        # that was silently destroyed on the first optimiser step. With one
+        # sample there is no spread to normalise: centring is the whole job.
+        adv = adv - adv.mean()
+        if adv.numel() > 1:
+            adv = adv / (adv.std() + 1e-8)
 
         totals = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
         batches = 0
@@ -426,6 +466,12 @@ class PPOAgent:
                 loss = (policy_loss
                         + VALUE_COEF * value_loss
                         - ENTROPY_COEF * entropy_mean)
+
+                # One non-finite batch used to poison every weight permanently.
+                # Dropping the step keeps the network usable and the run alive.
+                if not torch.isfinite(loss):
+                    self.skipped_updates += 1
+                    continue
 
                 self.optimizer.zero_grad()
                 loss.backward()
