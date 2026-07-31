@@ -20,12 +20,27 @@ from config import (
 from track import LAYOUTS
 
 
+def _positive(name, minimum=1):
+    """argparse type for an int that has a floor, with a readable message."""
+    def parse(raw):
+        try:
+            value = int(raw)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"{name} must be a whole number, got {raw!r}")
+        if value < minimum:
+            raise argparse.ArgumentTypeError(
+                f"{name} must be at least {minimum}, got {value}")
+        return value
+    return parse
+
+
 def _common_args(parser):
     parser.add_argument("--model", default=BEST_MODEL,
                         help=f"checkpoint path (default: {BEST_MODEL})")
     parser.add_argument("--layout", default="circuit", choices=sorted(LAYOUTS),
                         help="track layout to drive")
-    parser.add_argument("--laps", type=int, default=TOTAL_LAPS,
+    parser.add_argument("--laps", type=_positive("--laps"), default=TOTAL_LAPS,
                         help="laps that count as a finished run")
     parser.add_argument("--seed", type=int, default=SEED,
                         help="random seed for reproducible runs")
@@ -42,10 +57,13 @@ def build_parser():
     train.add_argument("--algo", choices=("ga", "ppo"), default="ga",
                        help="ga: neuroevolution (default). "
                             "ppo: gradient-based policy optimisation")
-    train.add_argument("--generations", type=int, default=NUM_GENERATIONS)
-    train.add_argument("--pop", type=int, default=POP_SIZE,
-                       help="population size (cars per generation)")
-    train.add_argument("--max-steps", type=int, default=MAX_STEPS_GEN,
+    train.add_argument("--generations", type=_positive("--generations"),
+                       default=NUM_GENERATIONS)
+    train.add_argument("--pop", type=_positive("--pop", minimum=2),
+                       default=POP_SIZE,
+                       help="population size (cars per generation, minimum 2)")
+    train.add_argument("--max-steps", type=_positive("--max-steps"),
+                       default=MAX_STEPS_GEN,
                        help="physics steps before a generation is cut short")
     train.add_argument("--headless", action="store_true",
                        help="train with no window (much faster)")
@@ -55,7 +73,9 @@ def build_parser():
                        help="start the visualiser at 1x instead of fast-forward")
     train.add_argument("--log-dir", default=LOG_DIR,
                        help="directory for per-generation CSV logs ('' to disable)")
-    train.add_argument("--checkpoint-every", type=int, default=CHECKPOINT_EVERY,
+    train.add_argument("--checkpoint-every",
+                       type=_positive("--checkpoint-every", minimum=0),
+                       default=CHECKPOINT_EVERY,
                        help="generations between numbered snapshots (0 to disable)")
     train.add_argument("--quiet", action="store_true")
 
@@ -64,8 +84,9 @@ def build_parser():
 
     ev = sub.add_parser("evaluate", help="score the saved policy headlessly")
     _common_args(ev)
-    ev.add_argument("--episodes", type=int, default=1)
-    ev.add_argument("--max-steps", type=int, default=MAX_STEPS_GEN)
+    ev.add_argument("--episodes", type=_positive("--episodes"), default=1)
+    ev.add_argument("--max-steps", type=_positive("--max-steps"),
+                    default=MAX_STEPS_GEN)
     ev.add_argument("--stochastic", action="store_true",
                     help="sample actions from the policy instead of taking the "
                          "mean (the mean is deterministic, so every episode "
@@ -99,7 +120,7 @@ def cmd_train(args):
             print(f"resumed {args.model} "
                   f"(generation {meta.get('generation', '?')}, "
                   f"phase {meta.get('phase', 1)})")
-        except (ValueError, RuntimeError, KeyError) as exc:
+        except LOAD_ERRORS as exc:
             print(f"starting fresh - could not resume {args.model}: {exc}")
 
     if args.headless:
@@ -123,10 +144,20 @@ def cmd_train(args):
     return 0
 
 
+# Everything a bad checkpoint can raise: unreadable file, wrong pickle, wrong
+# width, or a state_dict whose keys do not match the network.
+LOAD_ERRORS = (OSError, ValueError, RuntimeError, KeyError, EOFError)
+
+
 def _load_policy(args, deterministic=True):
+    """Build a single-car agent from `args.model`, or None with a message."""
     from ai import PolicyAgent
     agent = PolicyAgent(STATE_DIM, ACTION_DIM, deterministic=deterministic)
-    agent.load(args.model)
+    try:
+        agent.load(args.model)
+    except LOAD_ERRORS as exc:
+        print(f"could not load {args.model}: {exc}")
+        return None
     return agent
 
 
@@ -141,6 +172,8 @@ def cmd_replay(args):
 
     set_seed(args.seed)
     agent = _load_policy(args)
+    if agent is None:
+        return 1
     sim = Simulation(Track(args.layout), agent, pop_size=1,
                      total_laps=args.laps, max_steps=MAX_STEPS_GEN)
     try:
@@ -164,6 +197,8 @@ def cmd_evaluate(args):
 
     set_seed(args.seed)
     agent = _load_policy(args, deterministic=not args.stochastic)
+    if agent is None:
+        return 1
     sim = Simulation(Track(args.layout), agent, pop_size=1,
                      total_laps=args.laps, max_steps=args.max_steps)
 
