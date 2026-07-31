@@ -9,6 +9,14 @@ RAY_OFFSETS = (np.linspace(-RAY_SPREAD / 2, RAY_SPREAD / 2, NUM_RAYS)
                if NUM_RAYS > 1 else np.zeros(1))
 
 
+def _sanitise(control):
+    """Clamp a control input to [-1, 1], mapping NaN/inf to a neutral 0.0."""
+    value = float(control)
+    if not math.isfinite(value):
+        return 0.0
+    return max(-1.0, min(1.0, value))
+
+
 class Car:
     """A single agent-controlled car: physics, LiDAR sensing and lap telemetry.
 
@@ -70,8 +78,12 @@ class Car:
             return
         self.prev_pos = (self.x, self.y)
 
-        steering = float(np.clip(steering, -1.0, 1.0))
-        throttle = float(np.clip(throttle, -1.0, 1.0))
+        # A destabilised network can emit NaN/inf. np.clip passes NaN straight
+        # through, and one NaN turns position, heading, every ray and the whole
+        # fitness into NaN — which then sorts arbitrarily and can be crowned
+        # "best". Treat a non-finite control as no input at all.
+        steering = _sanitise(steering)
+        throttle = _sanitise(throttle)
 
         # Steering scales with speed so you can't spin in place
         speed_fac = max(self.speed / MAX_SPEED, 0.1)

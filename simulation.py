@@ -16,7 +16,7 @@ import torch
 
 from config import (
     POP_SIZE, TOTAL_LAPS, MAX_STEPS_GEN, NUM_GENERATIONS,
-    STATE_DIM, ACTION_DIM, CAR_COLORS,
+    STATE_DIM, ACTION_DIM,
     BEST_MODEL, MODEL_DIR, LOG_DIR, CHECKPOINT_EVERY,
 )
 from track import Track
@@ -110,8 +110,9 @@ class Simulation:
     def reset(self):
         """Spawn a fresh field and prime every car's sensors."""
         positions, angle = self._grid_positions()
-        self.cars = [Car(pos, angle, i % len(CAR_COLORS))
-                     for i, pos in enumerate(positions)]
+        # car_id is the grid slot, so telemetry rows identify a car uniquely;
+        # `Car` already wraps it into the colour palette on its own.
+        self.cars = [Car(pos, angle, i) for i, pos in enumerate(positions)]
         for car in self.cars:
             car.cast_rays(self.track)
         self.step_count = 0
@@ -204,6 +205,12 @@ class Trainer:
                  log_dir=LOG_DIR, quiet=False, checkpoint_every=CHECKPOINT_EVERY):
         self.agent = agent
         self.sim = simulation
+        # Phase-2 fitness normalises lap and checkpoint progress by the race
+        # distance. The CLI can change that with --laps, so the agent has to be
+        # told; otherwise a 1-lap race is still scored out of config.TOTAL_LAPS
+        # and no car can ever reach full marks.
+        if hasattr(agent, "total_laps"):
+            agent.total_laps = max(1, int(simulation.total_laps))
         self.model_path = model_path
         self.log_dir = log_dir
         self.quiet = quiet
