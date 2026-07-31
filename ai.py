@@ -96,7 +96,12 @@ class BatchedPolicy:
 # ── checkpoint helpers ───────────────────────────────────────
 
 def save_checkpoint(state_dict, path, state_dim, action_dim, **meta):
-    """Write weights plus metadata so a run can be resumed exactly."""
+    """Write weights plus metadata so a run can be resumed exactly.
+
+    Written to a sibling temp file and renamed into place. A 500-generation run
+    saves on every improvement; an interrupt or a full disk part-way through a
+    direct write leaves a truncated `best.pt` and takes the whole run with it.
+    """
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
@@ -106,7 +111,17 @@ def save_checkpoint(state_dict, path, state_dim, action_dim, **meta):
         "action_dim": action_dim,
     }
     payload.update(meta)
-    torch.save(payload, path)
+
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        torch.save(payload, tmp)
+        os.replace(tmp, path)       # atomic on POSIX and on Windows
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
     return path
 
 

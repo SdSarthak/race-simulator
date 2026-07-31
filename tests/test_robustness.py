@@ -249,6 +249,97 @@ def test_checkpoints_load_without_executing_arbitrary_pickle(tmp_path):
     PolicyAgent(STATE_DIM, ACTION_DIM).net.load_state_dict(state)
 
 
+# ── the saved model tracks the best of the phase being trained ──
+
+class _ScriptedTrainer(Trainer):
+    """Feeds `finish_generation` a fixed fitness so the bookkeeping is testable."""
+
+    def __init__(self, *args, script=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.script = list(script)
+        self.saved = []
+
+    def _learn(self, cars):
+        fitness = self.script.pop(0)
+        return fitness, fitness / 2.0, {}
+
+    def save(self, path=None):
+        self.saved.append((self.generation, self.phase))
+        super().save(path)
+
+
+def _scripted(tmp_path, script, name="best.pt"):
+    _, agent, sim = build(pop_size=4, total_laps=3, max_steps=5, seed=0)
+    return _ScriptedTrainer(agent, sim, model_path=str(tmp_path / name),
+                            log_dir=None, quiet=True, checkpoint_every=0,
+                            script=script)
+
+
+def test_phase_two_improvements_are_still_saved(tmp_path):
+    """Phase 1 scores in the tens of thousands, phase 2 around a thousand.
+
+    A single high-water mark carried across the switch rejected every phase-2
+    improvement, so the saved model froze the moment the phase flipped.
+    """
+    trainer = _scripted(tmp_path, [31000.0, 2600.0, 2700.0, 2500.0, 2900.0])
+    trainer.run_generation()                    # phase 1
+    assert trainer.saved == [(1, 1)]
+    trainer.phase = 2                           # route learned
+    for _ in range(4):
+        trainer.run_generation()
+    # 2600 (first of the phase), 2700 and 2900 improve; 2500 does not
+    assert [gen for gen, phase in trainer.saved if phase == 2] == [2, 3, 5]
+
+
+def test_a_worse_generation_does_not_overwrite_the_best(tmp_path):
+    trainer = _scripted(tmp_path, [500.0, 100.0, 400.0])
+    for _ in range(3):
+        trainer.run_generation()
+    assert trainer.saved == [(1, 1)]
+    assert trainer.best_fitness_ever == pytest.approx(500.0)
+
+
+def test_resuming_does_not_clobber_a_better_saved_model(tmp_path):
+    model = tmp_path / "resume.pt"
+    first = _scripted(tmp_path, [900.0], name="resume.pt")
+    first.run_generation()
+    assert first.saved == [(1, 1)]
+
+    _, agent, sim = build(pop_size=4, total_laps=3, max_steps=5, seed=1)
+    second = _ScriptedTrainer(agent, sim, model_path=str(model), log_dir=None,
+                              quiet=True, checkpoint_every=0, script=[100.0])
+    second.load()
+    assert second.best_fitness_ever == pytest.approx(900.0)
+    second.run_generation()
+    assert second.saved == []          # the weaker generation was not written
+
+
+# ── checkpoint writes are atomic ─────────────────────────────
+
+def test_a_failed_save_leaves_the_previous_checkpoint_intact(tmp_path, monkeypatch):
+    import ai
+    torch.manual_seed(29)
+    path = str(tmp_path / "best.pt")
+    good = PolicyNet(STATE_DIM, ACTION_DIM)
+    save_checkpoint(good.state_dict(), path, STATE_DIM, ACTION_DIM, generation=5)
+
+    real_save = torch.save
+
+    def explode(payload, target, *args, **kwargs):
+        real_save(payload, target, *args, **kwargs)
+        raise KeyboardInterrupt("interrupted mid-write")
+
+    monkeypatch.setattr(ai.torch, "save", explode)
+    with pytest.raises(KeyboardInterrupt):
+        save_checkpoint(PolicyNet(STATE_DIM, ACTION_DIM).state_dict(), path,
+                        STATE_DIM, ACTION_DIM, generation=6)
+    monkeypatch.undo()
+
+    state, meta = load_checkpoint(path, STATE_DIM, ACTION_DIM)
+    assert meta["generation"] == 5              # the old checkpoint survived
+    assert not list(tmp_path.glob("*.tmp"))     # and no debris was left behind
+
+
 # ── determinism of a whole training run ──────────────────────
 
 def _fitness_trace(seed, generations=3):

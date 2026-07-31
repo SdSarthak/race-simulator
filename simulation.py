@@ -6,6 +6,7 @@ server, in CI or inside tests. `main.py` drives it directly for headless runs;
 """
 
 import csv
+import math
 import os
 import random
 import time
@@ -218,7 +219,12 @@ class Trainer:
 
         self.generation = getattr(agent, "generation", 0)
         self.phase = getattr(agent, "phase", 1)
-        self.best_fitness_ever = -float("inf")
+        # Best fitness *per phase*. The two phases score on incomparable
+        # scales (phase 1 counts laps in tens of thousands, phase 2 balances
+        # terms around 1000), so a single high-water mark carried over from
+        # phase 1 would reject every phase-2 improvement for the rest of the
+        # run and freeze the saved model at the moment the phase flipped.
+        self.phase_best = {}
         self.global_best_time = float("inf")
         self.phase_changed = False
         self.history = []
@@ -292,8 +298,8 @@ class Trainer:
             value_loss=extra.get("value_loss", 0.0),
         )
 
-        if best_fit > self.best_fitness_ever:
-            self.best_fitness_ever = best_fit
+        if best_fit > self.phase_best.get(self.phase, -float("inf")):
+            self.phase_best[self.phase] = best_fit
             self.save()
 
         if (self.checkpoint_every and
@@ -327,9 +333,15 @@ class Trainer:
 
     # ── persistence ──────────────────────────────────────────
 
+    @property
+    def best_fitness_ever(self):
+        """Best score reached in the phase currently being trained."""
+        return self.phase_best.get(self.phase, -float("inf"))
+
     def save(self, path=None):
         self.agent.save(path or self.model_path,
-                        generation=self.generation, phase=self.phase)
+                        generation=self.generation, phase=self.phase,
+                        best_fitness=float(self.best_fitness_ever))
 
     def load(self, path=None):
         """Restore weights and, when present, generation/phase metadata."""
@@ -338,6 +350,11 @@ class Trainer:
         self.phase = meta.get("phase", self.phase)
         self.agent.generation = self.generation
         self.agent.phase = self.phase
+        # Without this the first generation after a resume always looks like an
+        # improvement and overwrites a better saved model with a worse one.
+        best = meta.get("best_fitness")
+        if best is not None and math.isfinite(float(best)):
+            self.phase_best[self.phase] = float(best)
         return meta
 
 
